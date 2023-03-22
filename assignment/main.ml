@@ -17,7 +17,6 @@ type expr =
   | Call of expr * expr
   | FunR of string * string * expr
   | Letrec of string * string * expr * expr
-  | CSeq of expr * expr
 
 (* Environment definition: association list, i.e., a list of pair (identifier, data) *)
 type 'v env = (string * 'v) list
@@ -40,7 +39,7 @@ let rec lookup env x =
   | (y, v) :: r -> if x = y then v else lookup r x
 
 (* === Interpreter === *)
-let rec eval (e : expr) (env : (string * value) list) : (value * (string * value) list) =
+let rec eval (e : expr) (env : (string * value) list) =
   match e with
   | EChar c -> (Char c, env)
   | EInt n -> (Int n, env)
@@ -56,15 +55,8 @@ let rec eval (e : expr) (env : (string * value) list) : (value * (string * value
         in
           (VList (evaluate_list e), env)
 
-  | Let (s, e1) ->
-      let let_value, env = eval e1 env in let env_upd = (s, let_value) :: env in (let_value, env_upd)
-  | LetIn (s, e1, e2) ->
-      let let_value, env = eval e1 env in
-        let env_upd = (s, let_value) :: env in
-          (* We do not keep env_upd after evaluating in_value *)
-          let in_value, _ = eval e2 env_upd in (in_value, env)
-
-  | Prim (op, e1, e2) -> (
+  | Prim (op, e1, e2) -> 
+    begin
       let v1, env = eval e1 env in
       let v2, env = eval e2 env in
         match (op, v1, v2) with
@@ -74,8 +66,15 @@ let rec eval (e : expr) (env : (string * value) list) : (value * (string * value
         | "=", Int i1, Int i2 -> (Int (if i1 = i2 then 1 else 0), env)
         | "<", Int i1, Int i2 -> (Int (if i1 < i2 then 1 else 0), env)
         | ">", Int i1, Int i2 -> (Int (if i1 > i2 then 1 else 0), env)
-        | _, _, _ -> failwith "Unexpected primitive.")
-
+        | _, _, _ -> failwith "Unexpected primitive."
+    end
+  | Let (s, e1) ->
+      let let_value, env = eval e1 env in let env_upd = (s, let_value) :: env in (let_value, env_upd)
+  | LetIn (s, e1, e2) ->
+      let let_value, env = eval e1 env in
+        let env_upd = (s, let_value) :: env in
+          (* We do not keep env_upd after evaluating in_value *)
+          let in_value, _ = eval e2 env_upd in (in_value, env)
   | If (e1, e2, e3) -> (
       let v1, env = eval e1 env 
       in
@@ -83,12 +82,15 @@ let rec eval (e : expr) (env : (string * value) list) : (value * (string * value
         | Int 1 -> eval e2 env 
         | Int 0 -> eval e3 env
         | _ -> failwith "Unexpected condition.")
-  | CSeq (e1, e2) ->
-    let e1_value, env_upd = eval e1 env in
-    eval e2 env_upd 
 
   | Fun (f_param, f_body) -> (Closure (f_param, f_body), env)
   | FunR (rec_f_name, f_param, f_body) -> (RecClosure(rec_f_name, f_param, f_body), env)
+  (*
+    when defining a recursive function and then using the same function in the
+    "in" part there is the need of an env update: let rec f ... in f 2, f is in 
+    the "let_body" and f is an unknown identifier in the current env, since it is
+    defined just now
+  *)
   | Letrec (rec_f_name, f_param, f_body, let_body) ->
       let rval, env = eval (FunR(rec_f_name, f_param, f_body)) env in
       let env_upd = (rec_f_name, rval)::env in
@@ -108,4 +110,18 @@ let rec eval (e : expr) (env : (string * value) list) : (value * (string * value
           eval f_body env_upd
       | _ -> failwith "Function unknown"
     end
-;;
+
+(* TESTS AND STUFF *)
+
+open Printf
+
+(*Proof of High-Order functionality*)
+let double = Fun ("x", Prim ("*", Var "x", EInt 2))
+let apply_function = Let("apply", Fun("f", Fun("x", Call(Var("f"), Var("x")))))
+let expr = Call(Call(apply_function, double), EInt 4)
+
+let main() = 
+  print_endline "prova";
+  match eval expr [] with 
+  | Int v, _ -> printf("%d") v
+  |  _ -> print_endline "no" ;;
