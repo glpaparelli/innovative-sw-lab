@@ -1,127 +1,173 @@
-(* Elementary types *)
+(* AST *)
 type expr =
   | EChar of char
   | EInt of int
   | EBool of bool
   | Var of string
-  (* needed only to define singleton lists *)
-  | ESingleList of expr
-  (* kinda: EList:= expr * EList | expr * expr (last element of the list) *)
-  | EList of expr * expr
-  (* == Commands == *)
-  | Let of string * expr
-  | LetIn of string * expr * expr
-  | Prim of string * expr * expr
-  | If of expr * expr * expr
-  | Fun of string * expr
-  | Call of expr * expr
-  | FunR of string * string * expr
-  | Letrec of string * string * expr * expr
 
-(* Environment definition: association list, i.e., a list of pair (identifier, data) *)
-type 'v env = (string * 'v) list
+  | LetIn of string * expr * expr               (* let x = e1 in e2 *)
+  | Prim of string * expr * expr                (* binop e1 e2 *)
+  | If of expr * expr * expr                    (* if e1 then e2 else e3 *)
+  | Fun of string * expr                        (* param identifier * funct body *)
+  | Call of expr * expr                         (* funct identifier * param *)
+  | FunR of string * string * expr              (* rec funct identifier * param identifier * funct body *)
+  | Letrec of string * string * expr * expr     (* let rec f x = e1 in e2 *)
 
-(* Runtime value definition (boolean are encoded as integers) *)
+  | GetInput of int                             (* stub function: integers from stdin *)
+
+(* environment definition: a list of triplets <variable, value, taintness> *)
+type 'v env = (string * 'v * bool) list
+
+(* runtime value definition (boolean are encoded as integers) *)
 type value =
-  (* == Values == *)
   | Char of char
   | Int of int
-  | Transition of int * char * int
-  | VList of value list
-  (* == Closures == *)
+  | Bool of bool
+
   | Closure of string * expr
   | RecClosure of string * string * expr
 
-(* Function to return data bounded to {x} in the environment *)
+(* function to return the value of the variable {x} *)
 let rec lookup env x =
   match env with
   | [] -> failwith (x ^ "not found")
-  | (y, v) :: r -> if x = y then v else lookup r x
+  | (y, v, _) :: r -> if x = y then v else lookup r x
 
-(* === Interpreter === *)
-let rec eval (e : expr) (env : (string * value) list) =
+(* function to return the taintness of a variable *)
+let rec t_lookup env x = 
+  match env with
+  | [] -> failwith (x ^ "not found")
+  | (y, _, t) :: r -> if x = y then t else t_lookup r x
+
+(* ------------------------------------ Interpreter ------------------------------------ *)
+
+(* 
+  Taintness is introduced only by the stub function GetInput and it is propagated during the 
+  execution of the program. 
+  The taintness here is "bounded" to the single expression: the eval function returns a triple 
+  <value v, environment, taintness of v>. 
+  This is necessary for the propagation of the taintness. 
+  
+  For exucuting GetInput(n) + 5 (that has taintness = true) we have to evaluate GetInput(n) and 5
+  sperately and get the value and taintness status of each to comute the resultant taintness.
+
+  The environment env is an association list <identifier, value, taintness of identifier> 
+  so that we can keep track of the taintness of identifiers and then propragate accordingly. 
+  (e.g.: expr: let x = GetInput(n), x will have tainted status = true in the env, and the expr will
+  return a triple <n, env, true>)
+*)
+
+let rec eval (e : expr) (env : (string * value * bool) list) : value * ((string * value * bool) list) * bool =
   match e with
-  | EChar c -> (Char c, env)
-  | EInt n -> (Int n, env)
-  | EBool n -> let n_int = if n then Int 1 else Int 0 in (n_int, env)
-  | Var x -> (lookup env x, env)
-  | ESingleList (e1) -> let e1_value, env = eval e1 env in (VList [e1_value], env)
-  | EList (e1, e2) ->
-      (* Internal function to create an `OCaml list` from a sequence of `VList` *)
-      let rec evaluate_list e =
-        match e with
-          | EList (e3, e4) -> let eval1, env = eval e3 env in eval1 :: evaluate_list e4
-          | e_last -> let eval1, env = eval e_last env in [ eval1 ]
-        in
-          (VList (evaluate_list e), env)
+  | EChar c -> (Char c, env, false)
+  | EInt n -> (Int n, env, false)
+  | EBool b -> (Bool b, env, false)
+
+  | Var x -> (lookup env x, env, t_lookup env x)
 
   | Prim (op, e1, e2) -> 
     begin
-      let v1, env = eval e1 env in
-      let v2, env = eval e2 env in
+      let v1, env, t1 = eval e1 env in
+      let v2, env, t2 = eval e2 env in
         match (op, v1, v2) with
-        | "*", Int i1, Int i2 -> (Int (i1 * i2), env)
-        | "+", Int i1, Int i2 -> (Int (i1 + i2), env)
-        | "-", Int i1, Int i2 -> (Int (i1 - i2), env)
-        | "=", Int i1, Int i2 -> (Int (if i1 = i2 then 1 else 0), env)
-        | "<", Int i1, Int i2 -> (Int (if i1 < i2 then 1 else 0), env)
-        | ">", Int i1, Int i2 -> (Int (if i1 > i2 then 1 else 0), env)
+        (* taintness of binary ops is given by the OR of the taintness of the args *)
+        | "*", Int i1, Int i2 -> (Int (i1 * i2), env, t1 || t2)
+        | "+", Int i1, Int i2 -> (Int (i1 + i2), env, t1 || t2)
+        | "-", Int i1, Int i2 -> (Int (i1 - i2), env, t1 || t2)
+        | "=", Int i1, Int i2 -> (Bool (if i1 = i2 then true else false), env, t1 || t2)
+        | "<", Int i1, Int i2 -> (Bool (if i1 < i2 then true else false), env, t1 || t2)
+        | ">", Int i1, Int i2 -> (Bool (if i1 > i2 then true else false), env, t1 || t2)
         | _, _, _ -> failwith "Unexpected primitive."
     end
-  | Let (s, e1) ->
-      let let_value, env = eval e1 env in let env_upd = (s, let_value) :: env in (let_value, env_upd)
-  | LetIn (s, e1, e2) ->
-      let let_value, env = eval e1 env in
-        let env_upd = (s, let_value) :: env in
-          (* We do not keep env_upd after evaluating in_value *)
-          let in_value, _ = eval e2 env_upd in (in_value, env)
-  | If (e1, e2, e3) -> (
-      let v1, env = eval e1 env 
-      in
-        match v1 with
-        | Int 1 -> eval e2 env 
-        | Int 0 -> eval e3 env
-        | _ -> failwith "Unexpected condition.")
 
-  | Fun (f_param, f_body) -> (Closure (f_param, f_body), env)
-  | FunR (rec_f_name, f_param, f_body) -> (RecClosure(rec_f_name, f_param, f_body), env)
+  | LetIn (s, e1, e2) ->
+      let v1, env, t1 = eval e1 env in
+        let env' = (s, v1, t1) :: env in
+          (* we do not keep env' after evaluating v2 *)
+          let v2, _, t2 = eval e2 env' in (v2, env, t2)
+
+  | If (e1, e2, e3) -> 
+      begin
+        let v1, env, t1 = eval e1 env in
+        match v1 with
+          | Bool true -> eval e2 env 
+          | Bool false -> eval e3 env
+          | _ -> failwith "Unexpected condition."
+      end
+
+  (* taintness of function depends only on the parameters on which they will be applied *)
+  | Fun (f_param, f_body) -> (Closure (f_param, f_body), env, false)
+  | FunR (f_name, f_param, f_body) -> (RecClosure(f_name, f_param, f_body), env, false)
+  
   (*
     when defining a recursive function and then using the same function in the
-    "in" part there is the need of an env update: let rec f ... in f 2, f is in 
+    "in" part there is the need of an env update: let rec f x = f_body in let_body, f is in 
     the "let_body" and f is an unknown identifier in the current env, since it is
     defined just now
   *)
-  | Letrec (rec_f_name, f_param, f_body, let_body) ->
-      let rval, env = eval (FunR(rec_f_name, f_param, f_body)) env in
-      let env_upd = (rec_f_name, rval)::env in
-      eval let_body env_upd
+  | Letrec (f_name, f_param, f_body, let_body) ->
+      let rval, env, _ = eval (FunR(f_name, f_param, f_body)) env in
+      let env' = (f_name, rval, false)::env in
+      eval let_body env'
 
+  (* functions are always executed, even on tainted arguments *)
   | Call (f_name, param) -> 
-    let f_closure, env = eval f_name env in
+    let f_closure, env, _ = eval f_name env in
     begin
       match f_closure with
       | Closure (f_param, f_body) ->
-          let f_param_val, env = eval param env in
-          let env_upd = (f_param, f_param_val) :: env in
-          eval f_body env_upd
-      | RecClosure(rec_f_name, f_param, f_body) ->
-          let f_param_val, env = eval param env in
-          let env_upd = (rec_f_name, f_closure)::(f_param, f_param_val)::env in
-          eval f_body env_upd
+          let f_param_val, env, f_param_t = eval param env in
+          let env' = (f_param, f_param_val, f_param_t) :: env in
+          eval f_body env'
+      | RecClosure(f_name, f_param, f_body) ->
+          let f_param_val, env, f_param_t = eval param env in
+          let env' = (f_name, f_closure, false)::(f_param, f_param_val, f_param_t)::env in
+          eval f_body env'
       | _ -> failwith "Function unknown"
     end
 
-(* TESTS AND STUFF *)
+  (* the input from the user is always considered tainted *)
+  | GetInput(n) -> (Int n, env, true)
 
+(* ----------------------------------------- Tests ----------------------------------------- *)
 open Printf
 
-(*Proof of High-Order functionality*)
-let double = Fun ("x", Prim ("*", Var "x", EInt 2))
-let apply_function = Let("apply", Fun("f", Fun("x", Call(Var("f"), Var("x")))))
-let expr = Call(Call(apply_function, double), EInt 4)
+(* ---- HO Test ---- *)
+(* here the let is used for simplicity in order to make apply_f more readable *)
+let times2 = Fun ("x", Prim ("*", Var "x", EInt 2))
+let apply_f = LetIn(
+  "apply", 
+  Fun("f", Fun("x", Call(Var("f"), Var("x")))), 
+  Call(Call(Var("apply"), times2), EInt 4)
+)
+let ho_test() = 
+  match eval apply_f [] with 
+  | Int v, _, _ -> printf("HO Test -> expected: 8 | obtained: %d\n") v
+  |  _ -> print_endline "" 
 
-let main() = 
-  print_endline "prova";
-  match eval expr [] with 
-  | Int v, _ -> printf("%d") v
-  |  _ -> print_endline "no" ;;
+(* Taintness Tests *)
+let untainted_let = LetIn("x", Prim("*", EInt(2), EInt(2)), Prim("+", Var("x"), EInt(1)))
+let test1() =
+  match eval untainted_let [] with
+  | (Int v, env, t) -> printf("Taint Test 1 -> expected: 5, false | obtained: %d, %b\n") v t
+  | _ -> print_endline "" 
+
+let tainted_let = LetIn("x", GetInput(4), Prim("+", Var("x"), EInt(1)))
+let test2() =
+  match eval tainted_let [] with
+  | (Int v, env, t) -> printf("Taint Test 2 -> expected: 5, true | obtained: %d, %b\n") v t
+  | _ -> print_endline "" 
+
+let plus5 = Fun("y", Prim ("+", Var "y", EInt 5))
+let f_taint = LetIn(
+  "f_taint", 
+  Fun("f", Fun("x", Call(Var("f"), Var("x")))), 
+  Call(Call(Var("f_taint"), plus5), GetInput(4))
+)
+let test3() = 
+    match eval f_taint [] with
+    | (Int v, env, t) -> printf("Taint Test 3 -> expcted: 9, true | obtained: %d, %b\n") v t
+    | _ -> print_endline "" 
+
+
+let main() = ho_test(), test1(), test2(), test3();;
