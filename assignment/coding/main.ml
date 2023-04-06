@@ -18,7 +18,7 @@ type expr =
 (* environment definition: a list of triplets <variable, value, taintness> *)
 type 'v env = (string * 'v * bool) list
 
-(* runtime value definition (boolean are encoded as integers) *)
+(* runtime value definition *)
 type value =
   | Char of char
   | Int of int
@@ -49,7 +49,7 @@ let rec t_lookup env x =
   This is necessary for the propagation of the taintness. 
   
   For exucuting GetInput(n) + 5 (that has taintness = true) we have to evaluate GetInput(n) and 5
-  sperately and get the value and taintness status of each to comute the resultant taintness.
+  sperately and get the value and taintness status of each to compute the resultant taintness.
 
   The environment env is an association list <identifier, value, taintness of identifier> 
   so that we can keep track of the taintness of identifiers and then propragate accordingly. 
